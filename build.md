@@ -1,7 +1,7 @@
 Facebook: 490.0.0.63.82  
-GooglePhotos: 7.44.0.803164237  
+GooglePhotos: 7.45.0.804174563  
 Messenger: 524.0.0.44.109  
-Music: 8.35.52  
+Music: 7.29.52  
 Reddit: 2024.17.0  
 TikTok: 36.5.4  
 YouTube: 20.13.41  
@@ -12,9 +12,9 @@ Use [zygisk-detach](https://github.com/j-hc/zygisk-detach) to detach root ReVanc
 [revanced-magisk-module](https://github.com/j-hc/revanced-magisk-module)
   
 CLI: j-hc/revanced-cli-5.0.0-all.jar  
-Patches: ReVanced/patches-5.35.0.rvp  
-[Changelog](https://github.com/ReVanced/revanced-patches/releases/tag/v5.35.0)  
+Patches: ReVanced/patches-5.36.0.rvp  
+[Changelog](https://github.com/ReVanced/revanced-patches/releases/tag/v5.36.0)  
 
 Skipped:  
 Patches: anddea/patches-3.12.0.rvp  
-Patches: inotia00/patches-5.10.1.rvp      
+Patches: inotia00/patches-5.10.1.rvp        
