@@ -35,7 +35,7 @@ toml_get() {
 		echo "$op"
 	else return 1; fi
 }
-
+gl_req() { _req "$1" "$2" -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0"; }
 pr() { echo -e "\033[0;32m[+] ${1}\033[0m"; }
 epr() {
 	echo >&2 -e "\033[0;31m[-] ${1}\033[0m"
@@ -52,23 +52,68 @@ abort() {
 }
 java() { env -i java --enable-native-access=ALL-UNNAMED "$@"; }
 
-get_prebuilts() {
+# Fetch patches from GitHub with GitLab fallback
+fetch_patches_asset() {
+	local src=$1 ver=$2
+	local resp url name tag_name asset
+
+	# Try GitHub first
+	if resp=$(gh_req "https://api.github.com/repos/${src}/releases/${ver:+tags/${ver}}" - 2>/dev/null); then
+		tag_name=$(jq -r '.tag_name' <<<"$resp")
+		asset=$(jq -r '.assets[] | select(.name | endswith(".rvp"))' <<<"$resp" 2>/dev/null) && {
+			url=$(jq -r '.browser_download_url' <<<"$asset")
+			name=$(jq -r '.name' <<<"$asset")
+			echo "$url|$name|$tag_name"
+			return 0
+		}
+	fi
+
+	# Fallback to GitLab
+	local encoded_src=${src//\//%2F}
+	local api_base="https://gitlab.com/api/v4/projects/${encoded_src}/releases"
+	if [ "$ver" = "latest" ]; then
+		resp=$(gl_req "${api_base}/permalink/latest" -) || return 1
+	elif [ "$ver" = "dev" ]; then
+		resp=$(gl_req "$api_base" -) || return 1
+		tag_name=$(jq -r '.[0].tag_name' <<<"$resp")
+		resp=$(gl_req "${api_base}/${tag_name}" -) || return 1
+	else
+		resp=$(gl_req "${api_base}/${ver}" -) || return 1
+	fi
+	
+	tag_name=$(jq -r '.tag_name' <<<"$resp")
+	asset=$(jq -r '.assets.links[] | select(.name | endswith(".rvp"))' <<<"$resp" 2>/dev/null)
+	if [ -n "$asset" ]; then
+		url=$(jq -r '.direct_asset_url // .url' <<<"$asset")
+		name=$(jq -r '.name' <<<"$asset")
+	else
+		# Fallback to naming convention
+		local filename="${src##*/}-${tag_name#v}.rvp"
+		url="https://gitlab.com/${src}/-/releases/download/${tag_name}/${filename}"
+		name="$filename"
+		curl -s --head -f "$url" >/dev/null || return 1
+	fi
+	echo "$url|$name|$tag_name"
+	return 0
+}
+
+get_rv_prebuilts() {
 	local cli_src=$1 cli_ver=$2 patches_src=$3 patches_ver=$4
 	pr "Getting prebuilts (${patches_src%/*})" >&2
 	local cl_dir=${patches_src%/*}
 	cl_dir=${TEMP_DIR}/${cl_dir,,}-rv
 	[ -d "$cl_dir" ] || mkdir "$cl_dir"
-
 	for src_ver in "$cli_src CLI $cli_ver cli" "$patches_src Patches $patches_ver patches"; do
 		set -- $src_ver
 		local src=$1 tag=$2 ver=${3-} fprefix=$4
-
+		local ext
 		if [ "$tag" = "CLI" ]; then
+			ext="jar"
 			local grab_cl=false
 		elif [ "$tag" = "Patches" ]; then
+			ext="rvp"
 			local grab_cl=true
 		else abort unreachable; fi
-
 		local dir=${src%/*}
 		dir=${TEMP_DIR}/${dir,,}-rv
 		[ -d "$dir" ] || mkdir "$dir"
@@ -77,7 +122,7 @@ get_prebuilts() {
 		if [ "$ver" = "dev" ]; then
 			local resp
 			resp=$(gh_req "$rv_rel" -) || return 1
-			ver=$(jq -e -r '.[] | .tag_name' <<<"$resp" | get_highest_ver) || return 1
+			ver=$(jq -e -r '.[] | .tag_name' <<<"$resp" | get_highest_ver) || return 1;
 		fi
 		if [ "$ver" = "latest" ]; then
 			rv_rel+="/latest"
@@ -87,29 +132,20 @@ get_prebuilts() {
 			name_ver="$ver"
 		fi
 
-		local url file tag_name matches
-		file=$(find "$dir" -name "*${fprefix}-${name_ver#v}.*" -type f 2>/dev/null)
+		local url file tag_name name asset_info
+		file=$(find "$dir" -name "${fprefix}-${name_ver#v}.${ext}" -type f 2>/dev/null)
 		if [ -z "$file" ]; then
-			local resp asset name
-			resp=$(gh_req "$rv_rel" -) || return 1
-			tag_name=$(jq -r '.tag_name' <<<"$resp") || return 1
-			matches=$(jq -e '.assets | map(select(.name | (endswith("asc") or endswith("json")) | not))' <<<"$resp") || return 1
-			if [ "$(jq 'length' <<<"$matches")" -gt 1 ]; then
-				local matches_new
-				matches_new=$(jq -e -r 'map(select(.name | contains("-dev") | not))' <<<"$matches")
-				if [ "$(jq 'length' <<<"$matches_new")" -eq 1 ]; then
-					matches=$matches_new
-				fi
+			if [ "$tag" = "Patches" ]; then
+				if ! asset_info=$(fetch_patches_asset "$src" "$ver"); then return 1; fi
+				IFS='|' read -r url name tag_name <<<"$asset_info"
+			else
+				local resp asset
+				resp=$(gh_req "$rv_rel" -) || return 1
+				tag_name=$(jq -r '.tag_name' <<<"$resp")
+				asset=$(jq -e -r ".assets[] | select(.name | endswith(\"$ext\"))" <<<"$resp") || return 1
+				url=$(jq -r .url <<<"$asset")
+				name=$(jq -r .name <<<"$asset")
 			fi
-			if [ "$(jq 'length' <<<"$matches")" -eq 0 ]; then
-				epr "No asset was found"
-				return 1
-			elif [ "$(jq 'length' <<<"$matches")" -ne 1 ]; then
-				wpr "More than 1 asset was found for this release. Falling back to the first one found..."
-			fi
-			asset=$(jq -r ".[0]" <<<"$matches")
-			url=$(jq -r .url <<<"$asset")
-			name=$(jq -r .name <<<"$asset")
 			file="${dir}/${name}"
 			gh_dl "$file" "$url" >&2 || return 1
 			echo "$tag: $(cut -d/ -f1 <<<"$src")/${name}  " >>"${cl_dir}/changelog.md"
@@ -124,17 +160,14 @@ get_prebuilts() {
 			tag_name=$(cut -d'-' -f3- <<<"$name")
 			tag_name=v${tag_name%.*}
 		fi
-
 		if [ "$tag" = "Patches" ]; then
-			if [ "$grab_cl" = true ]; then echo -e "[Changelog](https://github.com/${src}/releases/tag/${tag_name})\n" >>"${cl_dir}/changelog.md"; fi
+			if [ $grab_cl = true ]; then echo -e "[Changelog](https://github.com/${src}/releases/tag/${tag_name})\n" >>"${cl_dir}/changelog.md"; fi
 			if [ "$REMOVE_RV_INTEGRATIONS_CHECKS" = true ]; then
-				local extensions_ext
-				extensions_ext=$(unzip -l "${file}" "extensions/shared.*" | grep -o "shared\..*") extensions_ext="${extensions_ext#*.}"
 				if ! (
 					mkdir -p "${file}-zip" || return 1
 					unzip -qo "${file}" -d "${file}-zip" || return 1
-					java -cp "${BIN_DIR}/paccer.jar:${BIN_DIR}/dexlib2.jar" com.jhc.Main "${file}-zip/extensions/shared.${extensions_ext}" "${file}-zip/extensions/shared-patched.${extensions_ext}" || return 1
-					mv -f "${file}-zip/extensions/shared-patched.${extensions_ext}" "${file}-zip/extensions/shared.${extensions_ext}" || return 1
+					java -cp "${BIN_DIR}/paccer.jar:${BIN_DIR}/dexlib2.jar" com.jhc.Main "${file}-zip/extensions/shared.rve" "${file}-zip/extensions/shared-patched.rve" || return 1
+					mv -f "${file}-zip/extensions/shared-patched.rve" "${file}-zip/extensions/shared.rve" || return 1
 					rm "${file}" || return 1
 					cd "${file}-zip" || abort
 					zip -0rq "${CWD}/${file}" . || return 1
